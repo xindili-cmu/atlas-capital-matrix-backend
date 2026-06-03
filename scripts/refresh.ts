@@ -11,6 +11,7 @@
 import { prisma } from "../src/db.js";
 import { verifyOffice, scoutNewOffices, type OfficeFindings, type Confidence } from "../src/anthropic.js";
 import { scoreOffices } from "../src/score.js"; // same formula the API uses
+import { isAtlasMember } from "../src/atlas-allowlist.js"; // canonical Atlas-ecosystem tag
 
 // ── flags ──────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -44,8 +45,7 @@ function statusFor(conf: Confidence): "Published" | "Pending" {
   return conf === "Inferred" ? "Pending" : "Published"; // the gate
 }
 
-// Churn ranks the pool by PUBLISHED deals only, so unverified (Pending) edges don't keep an
-// office on the list. Defined here too (mirrors server.ts) — refresh.ts must not depend on it.
+// Prisma filter: only Published investments count toward score/breadth (mirrors server.ts).
 const PUBLISHED = { status: "Published" as const };
 
 async function main() {
@@ -125,6 +125,7 @@ async function main() {
   // ── Scout new entrants ───────────────────────────────────────────────────
   let added = 0;
   const promoted: string[] = [], demoted: string[] = [];
+  const atlasEntrants: string[] = []; // scouted NEW offices that are on the Atlas allowlist
   if (SCOUT) {
     const existingNames = (await prisma.office.findMany({ select: { name: true } })).map((o) => o.name);
     const scouted = await scoutNewOffices(existingNames);
@@ -132,9 +133,12 @@ async function main() {
     for (const s of scouted) {
       const verified = s.deals.filter((d) => d.confidence !== "Inferred" && d.source_url);
       if (verified.length === 0) { console.log(`    · skip (unverified): ${s.office}`); continue; }
-      if (DRY) { console.log(`    [dry] add NEW: ${s.office} (${verified.length} verified deal(s))`); added++; continue; }
+      const atlas = isAtlasMember(s.office, s.principal); // on the Atlas coalition allowlist?
+      if (atlas) atlasEntrants.push(s.office);
+      if (DRY) { console.log(`    ${atlas ? "★ [dry] add NEW (ATLAS ecosystem)" : "[dry] add NEW"}: ${s.office} (${verified.length} verified deal(s))`); added++; continue; }
       const office = await prisma.office.create({
         data: { name: s.office, principal: s.principal, category: s.category, hq: s.hq,
+                atlasMember: atlas,
                 activity90d: s.activity_90d, listed: false, note: s.notes },
       });
       for (const d of s.deals) {
@@ -143,7 +147,7 @@ async function main() {
         const inv = await prisma.investment.create({ data: { officeId: office.id, companyId: company.id, amountUsdM: d.amount_usd_m, confidence: d.confidence, status, sourceUrl: d.source_url, sourceName: d.source_name, verifiedAt: status === "Published" ? new Date() : null } });
         if (d.source_url) await prisma.source.create({ data: { investmentId: inv.id, url: d.source_url, outlet: d.source_name, verdict: status === "Published" ? "confirmed" : "inconclusive" } });
       }
-      added++; console.log(`    + added: ${s.office}`);
+      added++; console.log(`    ${atlas ? "★ added (ATLAS ECOSYSTEM member!)" : "+ added"}: ${s.office}`);
     }
   }
 
@@ -161,11 +165,12 @@ async function main() {
   console.log(`  churn: +${added} new · promoted ${promoted.length} · demoted ${demoted.length} · listed ${Math.min(LIST_SIZE, ranked.length)}/${ranked.length}`);
   if (promoted.length) console.log(`    ↑ promoted: ${promoted.join(", ")}`);
   if (demoted.length) console.log(`    ↓ demoted:  ${demoted.join(", ")}`);
+  if (atlasEntrants.length) console.log(`    ★ NEW ATLAS-ECOSYSTEM members entered this run: ${atlasEntrants.join(", ")}`);
 
   if (run) await prisma.run.update({
     where: { id: run.id },
     data: { finishedAt: new Date(), nNew: created, nVerified: published, nQuarantined: quarantined,
-            notes: `Phase 2 refresh — ${published} published, ${quarantined} quarantined, ${kept} kept; churn +${added} new, ${promoted.length} promoted, ${demoted.length} demoted` },
+            notes: `Phase 2 refresh — ${published} published, ${quarantined} quarantined, ${kept} kept; churn +${added} new (${atlasEntrants.length} Atlas), ${promoted.length} promoted, ${demoted.length} demoted${atlasEntrants.length ? ` [Atlas entrants: ${atlasEntrants.join("; ")}]` : ""}` },
   });
 
   console.log(`\nRefresh done${DRY ? " (DRY RUN)" : ""}: ${created} new edges · ${published} published · ${quarantined} quarantined · ${kept} kept.`);

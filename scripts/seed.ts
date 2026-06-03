@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { prisma } from "../src/db.js";
+import { isAtlasMember } from "../src/atlas-allowlist.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CSV = join(__dirname, "..", "data", "seed.csv");
@@ -61,7 +62,7 @@ async function main() {
         aumSource: ix("aum_source") >= 0 ? g[ix("aum_source")] || null : null,
         category: g[ix("category")] || "Family Office",
         hq: g[ix("hq")] || null,
-        atlasMember: /^y/i.test(g[ix("atlas_member")] || ""),
+        atlasMember: isAtlasMember(g[ix("family_office")], ix("principal") >= 0 ? g[ix("principal")] : null),
         note: g[ix("note")] || null,
         activity90d: ix("activity_90d") >= 0 ? Number(g[ix("activity_90d")]) || 0 : 0,
       },
