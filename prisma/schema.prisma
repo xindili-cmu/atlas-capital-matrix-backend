@@ -1,0 +1,78 @@
+// Atlas Capital Matrix — Phase 1 schema.
+// Mirrors §5 of the backend proposal. `investment` IS the network graph (office↔company edges).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Office {
+  id            String       @id @default(cuid())
+  name          String       @unique
+  principal     String?
+  aumText       String?      // raw AUM/net-worth string, e.g. "~$936B AUM (est.)"
+  aumConfidence String?      // Confirmed | Reported | Estimate | Unverifiable
+  aumSource     String?      // source URL or method note
+  category      String       // Sovereign Wealth | Billionaire Principal | Family Office | Corporate Strategic | Climate Fund / VC
+  hq            String?
+  atlasMember   Boolean      @default(false)
+  note          String?
+  activity90d   Int          @default(0)
+  investments   Investment[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model Company {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  type        String       @default("company") // company | fund
+  sector      String?
+  investments Investment[] @relation("CompanyInvestments")
+  viaFundFor  Investment[] @relation("ViaFund")
+}
+
+// One row = one office→company edge. This table is the graph.
+model Investment {
+  id          String   @id @default(cuid())
+  office      Office   @relation(fields: [officeId], references: [id])
+  officeId    String
+  company     Company  @relation("CompanyInvestments", fields: [companyId], references: [id])
+  companyId   String
+  amountUsdM  Int?
+  confidence  String   // Confirmed | Reported | Inferred
+  status      String   @default("Published") // Published | Pending  (the gate)
+  sourceUrl   String?
+  sourceName  String?
+  viaFund     Company? @relation("ViaFund", fields: [viaFundId], references: [id]) // office→fund→company (nullable; Phase 2)
+  viaFundId   String?
+  verifiedAt  DateTime?
+  firstSeenAt DateTime @default(now())
+  sources     Source[]
+}
+
+// Provenance audit trail (Phase 2 ingestion writes many of these per investment).
+model Source {
+  id           String     @id @default(cuid())
+  investment   Investment @relation(fields: [investmentId], references: [id])
+  investmentId String
+  url          String
+  outlet       String?
+  fetchedAt    DateTime   @default(now())
+  verdict      String?    // confirmed | rejected | inconclusive
+}
+
+// Every scheduled/seed run logs here (the Changelog).
+model Run {
+  id           String   @id @default(cuid())
+  startedAt    DateTime @default(now())
+  finishedAt   DateTime?
+  nNew         Int      @default(0)
+  nVerified    Int      @default(0)
+  nQuarantined Int      @default(0)
+  notes        String?
+}
