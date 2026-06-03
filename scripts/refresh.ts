@@ -7,6 +7,7 @@
 //   npm run refresh -- --dry-run            # show planned writes, touch nothing
 //   npm run refresh -- --limit 5            # only the first 5 offices (smoke test)
 //   npm run refresh -- --concurrency 6      # parallel verification calls (default 6)
+//   npm run refresh -- --stale 25          # only re-verify the 25 stalest offices (cheap weekly)
 //
 import { prisma } from "../src/db.js";
 import { verifyOffice, scoutNewOffices, type OfficeFindings, type Confidence } from "../src/anthropic.js";
@@ -25,6 +26,7 @@ const LIMIT = val("limit", 0);            // 0 = all
 const CONCURRENCY = val("concurrency", 6); // cap on simultaneous verification calls
 const SCOUT = !flag("no-scout");           // scout for new entrants (on by default)
 const LIST_SIZE = val("list-size", 100);   // how many offices stay on the public list
+const STALE = val("stale", 0);              // re-verify only the N least-recently-verified offices (0 = all)
 
 // ── concurrency pool (no extra deps): N workers pull from a shared queue ──────
 async function mapPool<T, R>(items: T[], n: number, fn: (t: T, i: number) => Promise<R>): Promise<R[]> {
@@ -49,9 +51,12 @@ function statusFor(conf: Confidence): "Published" | "Pending" {
 const PUBLISHED = { status: "Published" as const };
 
 async function main() {
-  let offices = await prisma.office.findMany({ orderBy: { name: "asc" } });
+  let offices = await prisma.office.findMany({
+    orderBy: STALE > 0 ? [{ lastVerifiedAt: { sort: "asc", nulls: "first" } }, { name: "asc" }] : { name: "asc" },
+  });
   if (LIMIT > 0) offices = offices.slice(0, LIMIT);
-  console.log(`Refresh start — ${offices.length} offices, concurrency ${CONCURRENCY}${DRY ? " (DRY RUN, no writes)" : ""}`);
+  else if (STALE > 0) offices = offices.slice(0, STALE);
+  console.log(`Refresh start — ${offices.length} offices${STALE > 0 ? " (rolling re-verify: stalest first)" : ""}, concurrency ${CONCURRENCY}${DRY ? " (DRY RUN, no writes)" : ""}`);
 
   const run = DRY ? null : await prisma.run.create({ data: { notes: "Phase 2 weekly refresh" } });
   let created = 0, published = 0, quarantined = 0, kept = 0;
@@ -66,7 +71,7 @@ async function main() {
     if (!f) continue;
 
     // update activity_90d (the field that moves the ranking)
-    if (!DRY) await prisma.office.update({ where: { id: f.officeId }, data: { activity90d: f.activity_90d } });
+    if (!DRY) await prisma.office.update({ where: { id: f.officeId }, data: { activity90d: f.activity_90d, lastVerifiedAt: new Date() } });
 
     for (const d of f.deals) {
       const status = statusFor(d.confidence);

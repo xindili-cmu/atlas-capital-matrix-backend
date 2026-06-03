@@ -9,6 +9,10 @@ import Anthropic from "@anthropic-ai/sdk";
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // Owner sets the exact model string in .env (model names change). Sensible default below.
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+// Cost lever: web searches per call. Each search injects ~16k tokens of context, so this is
+// the single biggest driver of spend. Defaults trimmed from 6/8 -> 2/4. Override via env.
+const VERIFY_SEARCHES = Math.max(1, Number(process.env.WEB_SEARCH_MAX_USES ?? 2));
+const SCOUT_SEARCHES  = Math.max(1, Number(process.env.SCOUT_SEARCH_MAX_USES ?? 4));
 
 export type Confidence = "Confirmed" | "Reported" | "Inferred";
 
@@ -78,7 +82,7 @@ Return [] if you cannot verify any new ones.`;
     model: MODEL,
     max_tokens: 3000,
     system: sys,
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 } as any],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: SCOUT_SEARCHES } as any],
     messages: [{ role: "user", content: user }],
   });
   const text = resp.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
@@ -132,7 +136,7 @@ Find this office's verified CLIMATE or FRONTIER-TECH investments, prioritising t
     max_tokens: 2000,
     system: SYSTEM,
     // Anthropic-executed server tool: Claude runs the searches and returns a final answer.
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 } as any],
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: VERIFY_SEARCHES } as any],
     messages: [{ role: "user", content: user }],
   });
 
