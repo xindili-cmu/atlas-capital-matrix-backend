@@ -143,7 +143,7 @@ async function main() {
       if (DRY) { console.log(`    ${atlas ? "★ [dry] add NEW (ATLAS ecosystem)" : "[dry] add NEW"}: ${s.office} (${verified.length} verified deal(s))`); added++; continue; }
       const office = await prisma.office.create({
         data: { name: s.office, principal: s.principal, category: s.category, hq: s.hq,
-                atlasMember: atlas,
+                atlasMember: atlas, lastVerifiedAt: new Date(), // just verified on entry; don't re-verify next run
                 activity90d: s.activity_90d, listed: false, note: s.notes },
       });
       for (const d of s.deals) {
