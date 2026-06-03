@@ -22,6 +22,7 @@ model Office {
   atlasMember   Boolean      @default(false)
   note          String?
   activity90d   Int          @default(0)
+  listed        Boolean      @default(true) // on the public top-N list? (churn sets this)
   investments   Investment[]
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt

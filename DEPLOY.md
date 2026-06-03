@@ -63,7 +63,7 @@ in one project, deployed straight from GitHub with no server config.
 In Railway, open the service shell (or run locally with the Railway `DATABASE_URL`):
 ```bash
 npm install
-npx prisma migrate deploy     # create the tables
+npx prisma db push           # create the tables from schema
 npm run seed                  # load the 100 audited rows from data/seed.csv
 ```
 Then open `https://<your-service>.up.railway.app/api/offices.csv` — you should see CSV rows.

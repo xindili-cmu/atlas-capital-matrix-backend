@@ -54,9 +54,15 @@ quarantine rule as the Sheet workflow.
 
 ## Scoring
 
-`score = 0.58·capital + 0.42·breadth` (activity weight 0 until Phase 2 feeds real
-`activity_90d`). Computed in `server.ts` so weights are easy to tune. See the proposal §8;
-the SpaceX-style single-figure distortion guard is a TODO noted in the code.
+`score = 0.40·activity + 0.35·capital + 0.25·breadth`, defined once in `src/score.ts` and
+imported by **both** `server.ts` (the page ranking) and `refresh.ts` (the churn decision) so
+they can never diverge. Capital is **log-scaled** so one huge figure (e.g. a $10B line) can't
+dominate the axis and flatten everyone else. Weights live in `SCORE_WEIGHTS` — tune in one place.
+
+`activity` is now weighted (it was 0 in Phase 1). This is what makes churn reward recency:
+the worker writes a real `activity_90d` each run, so a stale office (no recent deals) sinks
+and an active one rises. Until the first worker run, seeded `activity_90d` is a placeholder,
+so the very first ranking is approximate.
 
 ## Phase-1 simplifications (hardening for later)
 
@@ -120,3 +126,32 @@ Family-office portfolios move slowly — weekly is plenty. Example cron (Mondays
 - A `Pending`-review API endpoint for a human to promote quarantined rows (today: inspect
   the table directly).
 - Ingestion from RSS/filings (the worker is search-driven; feed pulls are a later add).
+
+---
+
+## Phase 2.1 — dynamic churn (scout + promote/demote)
+
+The weekly worker now keeps the list **fresh**, not fixed. Each run, after refreshing the
+existing offices, it:
+
+1. **Scouts** for NEW family offices / sovereign funds / corporate strategics (not VC) that
+   have a *verifiable* recent climate/frontier deal — same gate, real source required. Only
+   offices with ≥1 Confirmed/Reported deal are added; unverifiable candidates are skipped.
+2. **Churns**: ranks ALL offices in the pool by Published capital + breadth and keeps the
+   **top `--list-size` (default 100)** on the public list (`listed = true`). Offices that fall
+   below are **demoted, not deleted** (`listed = false`) — they can climb back next week.
+
+The public API/CSV/graph now serve only `listed = true` offices (add `?all=1` to `/api/offices`
+to see the full pool including benched ones).
+
+**Behaviour to expect:** because churn ranks by *verified* (Published) deals, the unverified
+`Inferred` rows have score 0 and are the first to be demoted as verified new entrants come in.
+So the list self-cleans toward fully-sourced offices over time — but its membership changes.
+
+Flags: `--no-scout` (refresh existing only, no new entrants), `--list-size N` (default 100).
+The `Run`/Changelog row records each run's `+new / promoted / demoted` counts.
+
+**Ranking signal:** churn ranks by the shared `src/score.ts` formula, which now **includes
+activity** (0.40 weight). So churn rewards recency: offices with recent verified deals rise
+and can enter the top `LIST_SIZE`; offices with no activity in 90 days sink and drop off.
+Membership genuinely changes week to week — that's the dynamic churn.

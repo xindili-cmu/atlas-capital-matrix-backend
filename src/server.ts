@@ -1,28 +1,10 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { prisma } from "./db.js";
+import { scoreOffices } from "./score.js"; // shared with the churn worker so the page ranking and the churn decision never diverge
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true }); // public read API
-
-// ── Scoring (proposal §8). activity weight 0 until Phase 2 feeds real activity_90d.
-const W = { activity: 0.0, capital: 0.58, breadth: 0.42 };
-// TODO (proposal §8): guard against one huge non-climate figure (e.g. SpaceX $10B)
-// dominating — cap or log-scale capital before normalising.
-function scoreOffices<T extends { activity90d: number; investments: { amountUsdM: number | null }[] }>(offices: T[]) {
-  const capital = offices.map((o) => o.investments.reduce((s, i) => s + (i.amountUsdM ?? 0), 0));
-  const breadth = offices.map((o) => o.investments.length);
-  const activity = offices.map((o) => o.activity90d ?? 0);
-  const max = (a: number[]) => Math.max(1, ...a);
-  const mc = max(capital), mb = max(breadth), ma = max(activity);
-  const sw = W.activity + W.capital + W.breadth;
-  return offices.map((o, i) => ({
-    ...o,
-    capitalUsdM: capital[i],
-    breadth: breadth[i],
-    score: Math.round(((W.activity * activity[i]) / ma + (W.capital * capital[i]) / mc + (W.breadth * breadth[i]) / mb) / sw * 100),
-  }));
-}
 
 // Public endpoints serve Published investments only — the gate.
 const PUBLISHED = { status: "Published" as const };
@@ -30,6 +12,7 @@ const PUBLISHED = { status: "Published" as const };
 app.get("/api/offices", async (req) => {
   const q = req.query as Record<string, string | undefined>;
   const where: any = {};
+  if (!q.all) where.listed = true;          // public list = top-N only (churn-managed)
   if (q.category) where.category = q.category;
   if (q.atlas_member) where.atlasMember = /^(y|true|1)/i.test(q.atlas_member);
   if (q.q) where.OR = [
@@ -66,7 +49,7 @@ app.get("/api/offices", async (req) => {
 
 app.get("/api/companies", async () => {
   const companies = await prisma.company.findMany({
-    include: { investments: { where: PUBLISHED, include: { office: true } } },
+    include: { investments: { where: { ...PUBLISHED, office: { listed: true } }, include: { office: true } } },
   });
   return companies
     .map((c) => ({
@@ -79,7 +62,7 @@ app.get("/api/companies", async () => {
 
 app.get("/api/graph", async () => {
   const investments = await prisma.investment.findMany({
-    where: PUBLISHED, include: { office: true, company: true },
+    where: { ...PUBLISHED, office: { listed: true } }, include: { office: true, company: true },
   });
   const nodes = new Map<string, any>();
   const links: any[] = [];
@@ -105,6 +88,7 @@ app.get("/api/changelog", async () => {
 app.get("/api/offices.csv", async (req, reply) => {
   const gate = Boolean((req.query as Record<string, string>).gate);
   const offices = await prisma.office.findMany({
+    where: { listed: true },
     include: { investments: { where: gate ? PUBLISHED : undefined, include: { company: true } } },
   });
   const cols = ["rank","family_office","principal","aum_networth","aum_confidence","aum_source","hq","category","atlas_member","companies_backed","mapped_raise_usd_m","activity_90d","confidence","source_url","note"];

@@ -9,7 +9,8 @@
 //   npm run refresh -- --concurrency 6      # parallel verification calls (default 6)
 //
 import { prisma } from "../src/db.js";
-import { verifyOffice, type OfficeFindings, type Confidence } from "../src/anthropic.js";
+import { verifyOffice, scoutNewOffices, type OfficeFindings, type Confidence } from "../src/anthropic.js";
+import { scoreOffices } from "../src/score.js"; // same formula the API uses
 
 // ── flags ──────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -21,6 +22,8 @@ const val = (n: string, d: number) => {
 const DRY = flag("dry-run");
 const LIMIT = val("limit", 0);            // 0 = all
 const CONCURRENCY = val("concurrency", 6); // cap on simultaneous verification calls
+const SCOUT = !flag("no-scout");           // scout for new entrants (on by default)
+const LIST_SIZE = val("list-size", 100);   // how many offices stay on the public list
 
 // ── concurrency pool (no extra deps): N workers pull from a shared queue ──────
 async function mapPool<T, R>(items: T[], n: number, fn: (t: T, i: number) => Promise<R>): Promise<R[]> {
@@ -40,6 +43,10 @@ async function mapPool<T, R>(items: T[], n: number, fn: (t: T, i: number) => Pro
 function statusFor(conf: Confidence): "Published" | "Pending" {
   return conf === "Inferred" ? "Pending" : "Published"; // the gate
 }
+
+// Churn ranks the pool by PUBLISHED deals only, so unverified (Pending) edges don't keep an
+// office on the list. Defined here too (mirrors server.ts) — refresh.ts must not depend on it.
+const PUBLISHED = { status: "Published" as const };
 
 async function main() {
   let offices = await prisma.office.findMany({ orderBy: { name: "asc" } });
@@ -115,10 +122,50 @@ async function main() {
     }
   }
 
+  // ── Scout new entrants ───────────────────────────────────────────────────
+  let added = 0;
+  const promoted: string[] = [], demoted: string[] = [];
+  if (SCOUT) {
+    const existingNames = (await prisma.office.findMany({ select: { name: true } })).map((o) => o.name);
+    const scouted = await scoutNewOffices(existingNames);
+    console.log(`  scouted ${scouted.length} candidate new office(s)`);
+    for (const s of scouted) {
+      const verified = s.deals.filter((d) => d.confidence !== "Inferred" && d.source_url);
+      if (verified.length === 0) { console.log(`    · skip (unverified): ${s.office}`); continue; }
+      if (DRY) { console.log(`    [dry] add NEW: ${s.office} (${verified.length} verified deal(s))`); added++; continue; }
+      const office = await prisma.office.create({
+        data: { name: s.office, principal: s.principal, category: s.category, hq: s.hq,
+                activity90d: s.activity_90d, listed: false, note: s.notes },
+      });
+      for (const d of s.deals) {
+        const company = await prisma.company.upsert({ where: { name: d.company }, update: {}, create: { name: d.company, type: d.is_fund ? "fund" : "company" } });
+        const status = d.confidence === "Inferred" ? "Pending" : "Published";
+        const inv = await prisma.investment.create({ data: { officeId: office.id, companyId: company.id, amountUsdM: d.amount_usd_m, confidence: d.confidence, status, sourceUrl: d.source_url, sourceName: d.source_name, verifiedAt: status === "Published" ? new Date() : null } });
+        if (d.source_url) await prisma.source.create({ data: { investmentId: inv.id, url: d.source_url, outlet: d.source_name, verdict: status === "Published" ? "confirmed" : "inconclusive" } });
+      }
+      added++; console.log(`    + added: ${s.office}`);
+    }
+  }
+
+  // ── Churn: rank ALL offices by the shared score (activity + capital + breadth), keep top LIST_SIZE listed ──
+  const pool = await prisma.office.findMany({ include: { investments: { where: PUBLISHED } } });
+  const ranked = scoreOffices(pool).sort((a, b) => b.score - a.score);
+  const keep = new Set(ranked.slice(0, LIST_SIZE).map((r) => r.id));
+  for (const r of ranked) {
+    const should = keep.has(r.id);
+    if (r.listed !== should) {
+      (should ? promoted : demoted).push(r.name);
+      if (!DRY) await prisma.office.update({ where: { id: r.id }, data: { listed: should } });
+    }
+  }
+  console.log(`  churn: +${added} new · promoted ${promoted.length} · demoted ${demoted.length} · listed ${Math.min(LIST_SIZE, ranked.length)}/${ranked.length}`);
+  if (promoted.length) console.log(`    ↑ promoted: ${promoted.join(", ")}`);
+  if (demoted.length) console.log(`    ↓ demoted:  ${demoted.join(", ")}`);
+
   if (run) await prisma.run.update({
     where: { id: run.id },
     data: { finishedAt: new Date(), nNew: created, nVerified: published, nQuarantined: quarantined,
-            notes: `Phase 2 refresh — ${published} published, ${quarantined} quarantined, ${kept} kept` },
+            notes: `Phase 2 refresh — ${published} published, ${quarantined} quarantined, ${kept} kept; churn +${added} new, ${promoted.length} promoted, ${demoted.length} demoted` },
   });
 
   console.log(`\nRefresh done${DRY ? " (DRY RUN)" : ""}: ${created} new edges · ${published} published · ${quarantined} quarantined · ${kept} kept.`);

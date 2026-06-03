@@ -54,6 +54,74 @@ function extractJson(text: string): any {
 
 const ALLOWED: Confidence[] = ["Confirmed", "Reported", "Inferred"];
 
+export interface ScoutedOffice extends OfficeFindings {
+  principal: string | null;
+  category: string; // Sovereign Wealth | Billionaire Principal | Family Office | Corporate Strategic
+  hq: string | null;
+}
+
+// Scout for NEW offices (not already in `existingNames`) that have verified, recent
+// climate/frontier investments. Same gate as verifyOffice — only return ones with a real
+// source. Used by the churn step to bring in fresh entrants.
+export async function scoutNewOffices(existingNames: string[], limit = 8): Promise<ScoutedOffice[]> {
+  const sys = `You find NEW institutional investors active in climate & frontier tech for a public capital matrix. Same evidence gate as always: every deal must be verifiable to a real source that names BOTH the investor and the company/fund; no real URL => do not include it. Only return FAMILY OFFICES, SOVEREIGN WEALTH FUNDS, or CORPORATE STRATEGIC investors — NOT venture-capital funds. Quality over quantity: it is better to return 2 well-sourced offices than 8 guesses.`;
+
+  const user = `Find up to ${limit} investors that are (a) NOT already in this list, and (b) have a recent, verifiable climate/frontier-tech investment:
+
+EXISTING (do not return these): ${existingNames.join("; ")}
+
+For each NEW one, return JSON only — an array:
+[{"office":"<name>","principal":"<family/person or null>","category":"Family Office|Sovereign Wealth|Corporate Strategic","hq":"<city or null>","deals":[{"company":"<name>","amount_usd_m":<number|null>,"confidence":"Confirmed|Reported|Inferred","source_url":"<url|null>","source_name":"<label|null>","is_fund":<bool>}],"activity_90d":<int>,"notes":"<one line>"}]
+Return [] if you cannot verify any new ones.`;
+
+  const resp = await client.messages.create({
+    model: MODEL,
+    max_tokens: 3000,
+    system: sys,
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 } as any],
+    messages: [{ role: "user", content: user }],
+  });
+  const text = resp.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+
+  let arr: any[];
+  try {
+    let t = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    const a = t.indexOf("["), b = t.lastIndexOf("]");
+    if (a >= 0 && b > a) t = t.slice(a, b + 1);
+    arr = JSON.parse(t);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(arr)) return [];
+
+  const existing = new Set(existingNames.map((n) => n.toLowerCase().trim()));
+  return arr
+    .filter((o: any) => o && o.office && !existing.has(String(o.office).toLowerCase().trim()))
+    .map((o: any): ScoutedOffice => {
+      const deals: VerifiedDeal[] = Array.isArray(o.deals) ? o.deals.map((d: any) => {
+        let conf: Confidence = ALLOWED.includes(d.confidence) ? d.confidence : "Inferred";
+        const url = typeof d.source_url === "string" && /^https?:\/\//i.test(d.source_url) ? d.source_url : null;
+        if (!url) conf = "Inferred";
+        return {
+          company: String(d.company ?? "").trim(),
+          amount_usd_m: Number.isFinite(d.amount_usd_m) ? Math.round(d.amount_usd_m) : null,
+          confidence: conf, source_url: url,
+          source_name: typeof d.source_name === "string" ? d.source_name : null,
+          is_fund: Boolean(d.is_fund),
+        };
+      }).filter((d: VerifiedDeal) => d.company) : [];
+      return {
+        office: String(o.office).trim(),
+        principal: typeof o.principal === "string" ? o.principal : null,
+        category: ["Family Office", "Sovereign Wealth", "Corporate Strategic", "Billionaire Principal"].includes(o.category) ? o.category : "Family Office",
+        hq: typeof o.hq === "string" ? o.hq : null,
+        deals,
+        activity_90d: Number.isFinite(o.activity_90d) ? Math.max(0, Math.round(o.activity_90d)) : deals.length,
+        notes: typeof o.notes === "string" ? o.notes.slice(0, 200) : "",
+      };
+    });
+}
+
 export async function verifyOffice(name: string, principal: string | null): Promise<OfficeFindings> {
   const user = `Office: ${name}${principal ? ` (principal/family: ${principal})` : ""}
 
