@@ -1,7 +1,7 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
-    "preDeployCommand": "npx prisma migrate deploy && npm run seed",
+    "preDeployCommand": "npx prisma db push && npm run seed",
     "startCommand": "npm start"
   }
 }
